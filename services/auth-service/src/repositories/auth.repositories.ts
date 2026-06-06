@@ -1,6 +1,6 @@
 import { db } from "@repo/db";
 import { eq } from "drizzle-orm";
-import { users } from "../../../../packages/db/src/schema";
+import { users } from "@repo/db/schema";
 
 export async function findByEmail(
   email: string
