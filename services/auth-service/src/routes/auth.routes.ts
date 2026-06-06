@@ -8,10 +8,6 @@ router.post(
   "/login",
   authController.login
 );
-router.post(
-  "/register",
-  authController.register
-);
 
 router.get("/test", (req, res) => {
   res.send("Auth Working");

@@ -28,19 +28,3 @@ export async function login(
     token
   });
 }
-
-export async function register(
-  req: Request,
-  res: Response
-) {
-
-  const user =
-    await authService.register(
-      req.body
-    );
-
-  return res.status(201).json({
-    success: true,
-    user,
-  });
-}
