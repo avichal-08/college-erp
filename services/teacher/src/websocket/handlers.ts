@@ -1,16 +1,26 @@
 import type { WebSocket } from "ws";
 
-import { validateAttendanceRequest } from "../middlewares/validateAttendance";
-import type { AttendanceRequest } from "../middlewares/validateAttendance";
 import type { ServerMessage } from "./protocol";
-import { broadcast } from "./connections";
-import { createSession, getSession, toView } from "./store";
+import type { SocketAuth } from "./auth";
+import { send, sendToStudents, sendToTeacher } from "./connections";
+import {
+  createSession,
+  getSessionWithContext,
+  toView,
+  getEnrolledStudentIds,
+  getOffering,
+  isStudentEnrolled,
+  markPending,
+  removePending,
+  getPendingView,
+  acceptSession,
+} from "./store";
 
-function send(ws: WebSocket, message: ServerMessage): void {
-  if (ws.readyState === ws.OPEN) {
-    ws.send(JSON.stringify(message));
-  }
-}
+type TeacherAuth = Extract<SocketAuth, { role: "TEACHER" }>;
+type StudentAuth = Extract<SocketAuth, { role: "STUDENT" }>;
+
+const SESSION_TYPES = ["LECTURE", "LAB"] as const;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function error(code: string, message: string, errors?: string[]): ServerMessage {
   return errors
@@ -18,63 +28,135 @@ function error(code: string, message: string, errors?: string[]): ServerMessage 
     : { type: "error", payload: { code, message } };
 }
 
+async function pushPendingUpdate(sessionId: string, teacherId: string): Promise<void> {
+  const students = await getPendingView(sessionId);
+  sendToTeacher(teacherId, {
+    type: "pending_update",
+    payload: { sessionId, students, totalMarked: students.length },
+  });
+}
+
 /**
- * Teacher creates a new attendance session.
- * Validates the body; on failure returns field errors and does NOT broadcast.
- * On success: confirms to the teacher WITH the code, and notifies all
- * students of the new attendance WITHOUT the code.
+ * Teacher opens a new attendance session for one of their own subject
+ * offerings. Persisted immediately (status OPEN) so it survives a
+ * restart — only the live "who's clicked so far" list stays in memory
+ * until accept.
  */
-export function handleCreateAttendance(
+export async function handleCreateAttendance(
   ws: WebSocket,
   payload: Record<string, unknown>,
-): void {
-  const body = payload as Partial<AttendanceRequest>;
-  const errors = validateAttendanceRequest(body);
+  auth: TeacherAuth,
+): Promise<void> {
+  const { subjectOfferingId, sessionType, sessionDate, timetableEntryId } = payload;
+
+  const errors: string[] = [];
+  if (typeof subjectOfferingId !== "string" || subjectOfferingId.trim() === "") {
+    errors.push("subjectOfferingId is required (string)");
+  }
+  if (typeof sessionType !== "string" || !SESSION_TYPES.includes(sessionType as never)) {
+    errors.push(`sessionType must be one of: ${SESSION_TYPES.join(", ")}`);
+  }
+  if (
+    typeof sessionDate !== "string" ||
+    !DATE_RE.test(sessionDate) ||
+    Number.isNaN(new Date(sessionDate).getTime())
+  ) {
+    errors.push("sessionDate must be a valid date string (YYYY-MM-DD)");
+  }
+  if (timetableEntryId !== undefined && typeof timetableEntryId !== "string") {
+    errors.push("timetableEntryId must be a string when provided");
+  }
   if (errors.length > 0) {
     send(ws, error("VALIDATION_FAILED", "Validation failed", errors));
     return;
   }
 
-  const normalized: AttendanceRequest = {
-    subject: body.subject!.trim(),
-    day: body.day!.trim().toLowerCase(),
-    date: body.date!,
-    timeSlot: body.timeSlot!.trim(),
-    sectionType: body.sectionType!.trim().toLowerCase() as "lab" | "lecture",
-  };
+  const offering = await getOffering(subjectOfferingId as string);
+  if (!offering) {
+    send(ws, error("OFFERING_NOT_FOUND", "No subject offering found for that id"));
+    return;
+  }
+  if (offering.teacherId !== auth.teacherProfileId) {
+    send(ws, error("FORBIDDEN", "You do not teach this subject offering"));
+    return;
+  }
 
-  const session = createSession(normalized);
-
-  // Teacher-only: includes the code they relay verbally to students.
-  send(ws, {
-    type: "attendance_created",
-    payload: { attendance: toView(session), code: session.code },
+  const created = await createSession({
+    subjectOfferingId: subjectOfferingId as string,
+    timetableEntryId: (timetableEntryId as string | undefined) ?? null,
+    sessionType: sessionType as "LECTURE" | "LAB",
+    sessionDate: sessionDate as string,
+    createdBy: auth.teacherProfileId,
   });
 
-  // Students: the live announcement, with NO code.
-  broadcast("student", {
-    type: "attendance_available",
-    payload: { attendance: toView(session) },
-  });
+  const session = await getSessionWithContext(created.id);
+  if (!session) {
+    send(ws, error("INTERNAL_ERROR", "Session was created but could not be loaded"));
+    return;
+  }
+  const view = toView(session);
+
+  send(ws, { type: "attendance_created", payload: { attendance: view } });
+
+  const enrolled = await getEnrolledStudentIds(subjectOfferingId as string);
+  sendToStudents(enrolled, { type: "attendance_available", payload: { attendance: view } });
 }
 
 /**
- * Student submits the 6-digit code for an attendance session.
- * Handles every misfault: missing fields, bad code format, unknown
- * session, wrong code, and duplicate submission.
+ * Student clicks "Mark Attendance". No code, no confirmation step from
+ * their side — this just adds them to the teacher's live pending list.
+ * Nothing is written to the database until the teacher accepts.
  */
-export function handleSubmitCode(
+export async function handleMarkAttendance(
   ws: WebSocket,
   payload: Record<string, unknown>,
-): void {
-  const { attendanceId, code, studentId } = payload;
-
-  if (typeof attendanceId !== "string" || attendanceId.trim() === "") {
-    send(ws, error("ATTENDANCE_ID_REQUIRED", "attendanceId is required (string)"));
+  auth: StudentAuth,
+): Promise<void> {
+  const { sessionId } = payload;
+  if (typeof sessionId !== "string" || sessionId.trim() === "") {
+    send(ws, error("SESSION_ID_REQUIRED", "sessionId is required (string)"));
     return;
   }
-  if (typeof code !== "string" || !/^\d{6}$/.test(code)) {
-    send(ws, error("INVALID_CODE_FORMAT", "Code must be exactly 6 digits"));
+
+  const session = await getSessionWithContext(sessionId);
+  if (!session) {
+    send(ws, error("SESSION_NOT_FOUND", "No attendance session found for this id"));
+    return;
+  }
+  if (session.status !== "OPEN") {
+    send(ws, error("SESSION_CLOSED", "This attendance session is no longer open"));
+    return;
+  }
+
+  const enrolled = await isStudentEnrolled(session.subjectOfferingId, auth.studentProfileId);
+  if (!enrolled) {
+    send(ws, error("NOT_ENROLLED", "You are not enrolled in this subject"));
+    return;
+  }
+
+  const markedAt = markPending(sessionId, auth.studentProfileId);
+  if (!markedAt) {
+    send(ws, error("ALREADY_MARKED", "You have already marked your attendance for this session"));
+    return;
+  }
+
+  send(ws, { type: "attendance_marked", payload: { sessionId } });
+  await pushPendingUpdate(sessionId, session.createdBy);
+}
+
+/**
+ * Teacher removes a student from the live pending list before accepting.
+ * This never touches the database — it only matters for what gets
+ * committed when accept runs. A removed student simply isn't PRESENT.
+ */
+export async function handleRemoveStudent(
+  ws: WebSocket,
+  payload: Record<string, unknown>,
+  auth: TeacherAuth,
+): Promise<void> {
+  const { sessionId, studentId } = payload;
+  if (typeof sessionId !== "string" || sessionId.trim() === "") {
+    send(ws, error("SESSION_ID_REQUIRED", "sessionId is required (string)"));
     return;
   }
   if (typeof studentId !== "string" || studentId.trim() === "") {
@@ -82,35 +164,59 @@ export function handleSubmitCode(
     return;
   }
 
-  const session = getSession(attendanceId);
+  const session = await getSessionWithContext(sessionId);
   if (!session) {
-    send(ws, error("SESSION_NOT_FOUND", "No active attendance session found for this ID"));
+    send(ws, error("SESSION_NOT_FOUND", "No attendance session found for this id"));
+    return;
+  }
+  if (session.createdBy !== auth.teacherProfileId) {
+    send(ws, error("FORBIDDEN", "You did not create this session"));
+    return;
+  }
+  if (session.status !== "OPEN") {
+    send(ws, error("SESSION_CLOSED", "This attendance session is no longer open"));
     return;
   }
 
-  if (session.studentsMarked.has(studentId)) {
-    send(ws, error("ALREADY_MARKED", "You have already marked your attendance for this session"));
+  removePending(sessionId, studentId);
+  await pushPendingUpdate(sessionId, auth.teacherProfileId);
+}
+
+/**
+ * Teacher commits the session: every enrolled student is written to the
+ * database as PRESENT (if still in the pending list) or ABSENT, and the
+ * session flips to ACCEPTED. This is the only point at which anything
+ * attendance-related is actually persisted as a final record.
+ */
+export async function handleAcceptAttendance(
+  ws: WebSocket,
+  payload: Record<string, unknown>,
+  auth: TeacherAuth,
+): Promise<void> {
+  const { sessionId } = payload;
+  if (typeof sessionId !== "string" || sessionId.trim() === "") {
+    send(ws, error("SESSION_ID_REQUIRED", "sessionId is required (string)"));
     return;
   }
 
-  if (code !== session.code) {
-    // Input error: attendance is NOT marked, student may retry.
-    send(ws, error("INCORRECT_CODE", "Incorrect code. Attendance not marked."));
+  const session = await getSessionWithContext(sessionId);
+  if (!session) {
+    send(ws, error("SESSION_NOT_FOUND", "No attendance session found for this id"));
+    return;
+  }
+  if (session.createdBy !== auth.teacherProfileId) {
+    send(ws, error("FORBIDDEN", "You did not create this session"));
+    return;
+  }
+  if (session.status !== "OPEN") {
+    send(ws, error("SESSION_CLOSED", "This attendance session is no longer open"));
     return;
   }
 
-  // Success.
-  session.studentsMarked.add(studentId);
-  send(ws, {
-    type: "attendance_marked",
-    payload: { attendanceId: session.id, studentId },
-  });
-  broadcast("teacher", {
-    type: "student_marked",
-    payload: {
-      attendanceId: session.id,
-      studentId,
-      totalMarked: session.studentsMarked.size,
-    },
-  });
+  await acceptSession(sessionId, session.subjectOfferingId);
+
+  const enrolled = await getEnrolledStudentIds(session.subjectOfferingId);
+  const message: ServerMessage = { type: "attendance_accepted", payload: { sessionId } };
+  send(ws, message);
+  sendToStudents(enrolled, message);
 }

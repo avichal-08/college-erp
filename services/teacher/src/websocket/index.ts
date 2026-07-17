@@ -1,19 +1,19 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "node:http";
 
-import type { Role } from "./protocol";
+import { authenticateConnection } from "./auth";
+import type { SocketAuth } from "./auth";
 import { parseClientMessage } from "./protocol";
-import { addConnection, removeConnection } from "./connections";
-import { handleCreateAttendance, handleSubmitCode } from "./handlers";
-import { listSessions, toView } from "./store";
+import { addConnection, removeConnection, send } from "./connections";
+import {
+  handleCreateAttendance,
+  handleMarkAttendance,
+  handleRemoveStudent,
+  handleAcceptAttendance,
+} from "./handlers";
+import { getOpenSessionsForStudent, toView } from "./store";
 
 type Socket = WebSocket & { isAlive?: boolean };
-
-function parseRole(url: string | undefined): Role | null {
-  if (!url) return null;
-  const role = new URL(url, "http://localhost").searchParams.get("role");
-  return role === "teacher" || role === "student" ? role : null;
-}
 
 function sendError(ws: WebSocket, code: string, message: string): void {
   if (ws.readyState === ws.OPEN) {
@@ -22,38 +22,49 @@ function sendError(ws: WebSocket, code: string, message: string): void {
 }
 
 /**
- * Attach the attendance WebSocket server to the existing HTTP server
- * so it shares the Express port. Clients connect to `/ws?role=teacher`
- * or `/ws?role=student`.
+ * Attach the attendance WebSocket server to the existing HTTP server so it
+ * shares the Express port. Auth happens during the HTTP upgrade itself,
+ * verifying the same `accessToken` cookie auth-service issues — an
+ * unauthenticated request never completes the WS handshake at all, it
+ * gets a real 401 instead of a WS close code.
  */
 export function createWebSocketServer(server: Server, path = "/ws"): WebSocketServer {
-  const wss = new WebSocketServer({ server, path });
+  const wss = new WebSocketServer({ noServer: true });
 
-  wss.on("connection", (ws: Socket, req) => {
-    const role = parseRole(req.url);
-    if (!role) {
-      sendError(ws, "ROLE_REQUIRED", "Connect with ?role=teacher or ?role=student");
-      ws.close(1008, "role required");
-      return;
+  server.on("upgrade", (req, socket, head) => {
+    if (!req.url || new URL(req.url, "http://localhost").pathname !== path) {
+      return; // not ours
     }
 
-    addConnection(ws, role);
+    authenticateConnection(req)
+      .then((auth) => {
+        if (!auth) {
+          socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+          socket.destroy();
+          return;
+        }
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          wss.emit("connection", ws, auth);
+        });
+      })
+      .catch(() => {
+        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+      });
+  });
+
+  wss.on("connection", async (ws: Socket, auth: SocketAuth) => {
+    addConnection(ws, auth);
     ws.isAlive = true;
 
-    if (ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify({ type: "connected", payload: { role } }));
-    }
+    send(ws, { type: "connected", payload: { role: auth.role } });
 
-    // Late-join: a student connecting after attendance was created still
-    // receives every currently-active session.
-    if (role === "student") {
-      for (const session of listSessions()) {
-        if (ws.readyState === ws.OPEN) {
-          ws.send(JSON.stringify({
-            type: "attendance_available",
-            payload: { attendance: toView(session) },
-          }));
-        }
+    // Late-join: a student connecting after sessions were created still
+    // sees every currently-open session they're enrolled in.
+    if (auth.role === "STUDENT") {
+      const openSessions = await getOpenSessionsForStudent(auth.studentProfileId);
+      for (const session of openSessions) {
+        send(ws, { type: "attendance_available", payload: { attendance: toView(session) } });
       }
     }
 
@@ -61,7 +72,7 @@ export function createWebSocketServer(server: Server, path = "/ws"): WebSocketSe
       ws.isAlive = true;
     });
 
-    ws.on("message", (raw) => {
+    ws.on("message", async (raw) => {
       let parsed: unknown;
       try {
         parsed = JSON.parse(raw.toString());
@@ -76,20 +87,44 @@ export function createWebSocketServer(server: Server, path = "/ws"): WebSocketSe
         return;
       }
 
-      // Role enforcement.
-      if (msg.type === "create_attendance" && role !== "teacher") {
-        sendError(ws, "FORBIDDEN", "Only teachers can create attendance");
-        return;
-      }
-      if (msg.type === "submit_code" && role !== "student") {
-        sendError(ws, "FORBIDDEN", "Only students can submit a code");
-        return;
-      }
-
-      if (msg.type === "create_attendance") {
-        handleCreateAttendance(ws, msg.payload);
-      } else {
-        handleSubmitCode(ws, msg.payload);
+      try {
+        switch (msg.type) {
+          case "create_attendance": {
+            if (auth.role !== "TEACHER") {
+              sendError(ws, "FORBIDDEN", "Only teachers can create attendance");
+              return;
+            }
+            await handleCreateAttendance(ws, msg.payload, auth);
+            return;
+          }
+          case "mark_attendance": {
+            if (auth.role !== "STUDENT") {
+              sendError(ws, "FORBIDDEN", "Only students can mark attendance");
+              return;
+            }
+            await handleMarkAttendance(ws, msg.payload, auth);
+            return;
+          }
+          case "remove_student": {
+            if (auth.role !== "TEACHER") {
+              sendError(ws, "FORBIDDEN", "Only teachers can remove a student");
+              return;
+            }
+            await handleRemoveStudent(ws, msg.payload, auth);
+            return;
+          }
+          case "accept_attendance": {
+            if (auth.role !== "TEACHER") {
+              sendError(ws, "FORBIDDEN", "Only teachers can accept attendance");
+              return;
+            }
+            await handleAcceptAttendance(ws, msg.payload, auth);
+            return;
+          }
+        }
+      } catch (err) {
+        console.error("WS handler error:", err);
+        sendError(ws, "INTERNAL_ERROR", "Something went wrong processing that message");
       }
     });
 

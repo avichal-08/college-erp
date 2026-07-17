@@ -4,19 +4,25 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "bun --watch index.ts",
-    "start": "bun index.ts"
+    "dev": "bun --watch --env-file=../../.env index.ts",
+    "start": "bun --env-file=../../.env index.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/express": "^5.0.6",
-    "@types/ws": "^8.5.13"
+    "@types/ws": "^8.5.13",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/cookie": "^1.0.0"
   },
   "peerDependencies": {
     "typescript": "^7"
   },
   "dependencies": {
+    "@repo/db": "workspace:*",
+    "drizzle-orm": "^0.45.2",
     "express": "^5.2.1",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "jsonwebtoken": "^9.0.3",
+    "cookie": "^1.0.2"
   }
 }

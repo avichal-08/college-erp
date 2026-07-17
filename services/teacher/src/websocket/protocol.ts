@@ -1,30 +1,58 @@
 // Shared message protocol between WebSocket clients and the server.
+// Role now comes from the verified `accessToken` cookie (see auth.ts),
+// never from anything the client claims in a message.
 
-export type Role = "teacher" | "student";
+export type Role = "TEACHER" | "STUDENT";
 
 // Client -> Server
 export type ClientMessage =
   | { type: "create_attendance"; payload: Record<string, unknown> }
-  | { type: "submit_code"; payload: Record<string, unknown> };
+  | { type: "mark_attendance"; payload: Record<string, unknown> }
+  | { type: "remove_student"; payload: Record<string, unknown> }
+  | { type: "accept_attendance"; payload: Record<string, unknown> };
 
-// The attendance shape broadcast to students (deliberately EXCLUDES the code).
+const CLIENT_MESSAGE_TYPES = [
+  "create_attendance",
+  "mark_attendance",
+  "remove_student",
+  "accept_attendance",
+] as const;
+
+// What both roles see once a session exists.
 export interface AttendanceView {
   id: string;
-  subject: string;
-  day: string;
-  date: string;
-  timeSlot: string;
-  sectionType: "lab" | "lecture";
+  subjectOfferingId: string;
+  subjectCode: string;
+  subjectName: string;
+  teacherName: string;
+  sessionType: "LECTURE" | "LAB";
+  sessionDate: string;
+  classroom: string | null;
+  startTime: string | null;
+  endTime: string | null;
+  status: "OPEN" | "ACCEPTED" | "CANCELLED";
   createdAt: string;
+}
+
+// One row in the teacher's live pending list.
+export interface PendingStudent {
+  studentId: string;
+  name: string;
+  sectionRollNo: string;
+  markedAt: string;
 }
 
 // Server -> Client
 export type ServerMessage =
   | { type: "connected"; payload: { role: Role } }
-  | { type: "attendance_created"; payload: { attendance: AttendanceView; code: string } } // teacher only (has code)
-  | { type: "attendance_available"; payload: { attendance: AttendanceView } } // students (no code)
-  | { type: "attendance_marked"; payload: { attendanceId: string; studentId: string } } // student who submitted
-  | { type: "student_marked"; payload: { attendanceId: string; studentId: string; totalMarked: number } } // teachers
+  | { type: "attendance_created"; payload: { attendance: AttendanceView } } // ack to the creating teacher
+  | { type: "attendance_available"; payload: { attendance: AttendanceView } } // pushed to enrolled students
+  | { type: "attendance_marked"; payload: { sessionId: string } } // ack to the student who clicked
+  | {
+      type: "pending_update";
+      payload: { sessionId: string; students: PendingStudent[]; totalMarked: number };
+    } // pushed to the owning teacher after every mark/remove
+  | { type: "attendance_accepted"; payload: { sessionId: string } } // pushed to teacher + enrolled students
   | { type: "error"; payload: { code?: string; message: string; errors?: string[] } };
 
 /**
@@ -44,7 +72,7 @@ export function parseClientMessage(
     return { error: "Missing or invalid 'type' field" };
   }
 
-  if (msg.type !== "create_attendance" && msg.type !== "submit_code") {
+  if (!CLIENT_MESSAGE_TYPES.includes(msg.type as (typeof CLIENT_MESSAGE_TYPES)[number])) {
     return { error: `Unknown message type: '${msg.type}'` };
   }
 
