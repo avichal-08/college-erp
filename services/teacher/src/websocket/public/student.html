@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Student — Mark Attendance</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 520px; margin: 2rem auto; padding: 0 1rem; }
+      h1 { font-size: 1.3rem; }
+      #status { font-weight: 600; margin-bottom: 1rem; }
+      .card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 1rem; margin: 1rem 0; }
+      .card h3 { margin: 0 0 .4rem; }
+      .meta { font-size: .85rem; color: #475569; }
+      label { display: grid; gap: .2rem; font-size: .8rem; margin-top: .6rem; }
+      input { padding: .5rem; border: 1px solid #ccc; border-radius: 6px; }
+      input.code { font-size: 1.4rem; letter-spacing: .3rem; text-align: center; }
+      button { margin-top: .6rem; padding: .6rem; border: 0; border-radius: 6px; background: #16a34a; color: #fff; cursor: pointer; }
+      #log { font-family: monospace; font-size: .8rem; white-space: pre-wrap; background: #0f172a; color: #e2e8f0; padding: 1rem; border-radius: 8px; max-height: 200px; overflow: auto; }
+      .ok { color: #4ade80; }
+      .err { color: #f87171; }
+    </style>
+  </head>
+  <body>
+    <h1>Student — Mark Attendance</h1>
+    <div id="status">Connecting…</div>
+    <div id="cards"></div>
+    <div id="log"></div>
+
+    <script>
+      const ws = new WebSocket(`ws://${location.host}/ws?role=student`);
+      const status = document.getElementById("status");
+      const cards = document.getElementById("cards");
+      const log = document.getElementById("log");
+
+      // Persist a student id for this browser so re-marking is detected.
+      let studentId = localStorage.getItem("studentId");
+      if (!studentId) {
+        studentId = "stu-" + Math.random().toString(36).slice(2, 8);
+        localStorage.setItem("studentId", studentId);
+      }
+
+      const show = (text, kind) => {
+        const line = document.createElement("div");
+        line.className = kind;
+        line.textContent = text;
+        log.appendChild(line);
+        log.scrollTop = log.scrollHeight;
+      };
+
+      ws.onopen = () => (status.textContent = `Connected as student (id: ${studentId})`);
+      ws.onclose = () => (status.textContent = "Disconnected");
+      ws.onerror = () => (status.textContent = "WebSocket error");
+
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "connected") show(`Connected (${msg.payload.role})`, "ok");
+        else if (msg.type === "attendance_available") renderCard(msg.payload.attendance);
+        else if (msg.type === "attendance_marked") {
+          show(`✅ Attendance marked for ${msg.payload.attendanceId}`, "ok");
+          markCardDone(msg.payload.attendanceId);
+        } else if (msg.type === "error") {
+          show(`Error [${msg.payload.code}]: ${msg.payload.message}`, "err");
+        }
+      };
+
+      function renderCard(a) {
+        if (document.getElementById("card-" + a.id)) return; // already shown
+        const card = document.createElement("div");
+        card.className = "card";
+        card.id = "card-" + a.id;
+        card.innerHTML = `
+          <h3>${a.subject} <span class="meta">(${a.sectionType})</span></h3>
+          <div class="meta">${a.day} · ${a.date} · ${a.timeSlot}</div>
+          <label>Enter 6-digit code
+            <input class="code" id="code-${a.id}" inputmode="numeric" maxlength="6" placeholder="______" />
+          </label>
+          <button id="btn-${a.id}">Mark Attendance</button>
+        `;
+        cards.appendChild(card);
+        document.getElementById("btn-" + a.id).onclick = () => submitCode(a.id);
+        show(`New attendance available: ${a.subject} (${a.sectionType})`, "ok");
+      }
+
+      function submitCode(attendanceId) {
+        const code = document.getElementById("code-" + attendanceId).value.trim();
+        ws.send(JSON.stringify({ type: "submit_code", payload: { attendanceId, code, studentId } }));
+      }
+
+      function markCardDone(attendanceId) {
+        const card = document.getElementById("card-" + attendanceId);
+        if (card) {
+          card.style.borderColor = "#16a34a";
+          const btn = document.getElementById("btn-" + attendanceId);
+          if (btn) { btn.disabled = true; btn.textContent = "Marked ✓"; }
+        }
+      }
+    </script>
+  </body>
+</html>

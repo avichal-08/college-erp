@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Teacher — Create Attendance</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 520px; margin: 2rem auto; padding: 0 1rem; }
+      h1 { font-size: 1.3rem; }
+      #status { font-weight: 600; }
+      form { display: grid; gap: .6rem; margin: 1rem 0; }
+      label { display: grid; gap: .2rem; font-size: .85rem; }
+      input { padding: .5rem; border: 1px solid #ccc; border-radius: 6px; }
+      button { padding: .6rem; border: 0; border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer; }
+      .code-box { background: #f1f5f9; border: 1px dashed #94a3b8; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+      .code { font-size: 1.6rem; letter-spacing: .3rem; font-weight: 700; color: #0f172a; }
+      #log { font-family: monospace; font-size: .8rem; white-space: pre-wrap; background: #0f172a; color: #e2e8f0; padding: 1rem; border-radius: 8px; max-height: 240px; overflow: auto; }
+      .ok { color: #4ade80; }
+      .err { color: #f87171; }
+      .hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <h1>Teacher — Create Attendance</h1>
+    <div id="status">Connecting…</div>
+
+    <form id="form">
+      <label>Subject<input id="subject" value="phy" /></label>
+      <label>Day<input id="day" value="sunday" placeholder="monday .. sunday" /></label>
+      <label>Date<input id="date" value="2026-07-21" placeholder="YYYY-MM-DD" /></label>
+      <label>Time Slot<input id="timeSlot" value="2pm-3pm" /></label>
+      <label>Section Type<input id="sectionType" value="lab" placeholder="lab | lecture" /></label>
+      <button type="submit">Create Attendance</button>
+    </form>
+
+    <div id="codeBox" class="code-box hidden"></div>
+    <div id="log"></div>
+
+    <script>
+      const ws = new WebSocket(`ws://${location.host}/ws?role=teacher`);
+      const status = document.getElementById("status");
+      const log = document.getElementById("log");
+      const codeBox = document.getElementById("codeBox");
+      const form = document.getElementById("form");
+      const fields = ["subject", "day", "date", "timeSlot", "sectionType"].reduce((acc, id) => {
+        acc[id] = document.getElementById(id);
+        return acc;
+      }, {});
+
+      const show = (text, kind) => {
+        const line = document.createElement("div");
+        line.className = kind;
+        line.textContent = text;
+        log.appendChild(line);
+        log.scrollTop = log.scrollHeight;
+      };
+
+      ws.onopen = () => (status.textContent = "Connected as teacher");
+      ws.onclose = () => (status.textContent = "Disconnected");
+      ws.onerror = () => (status.textContent = "WebSocket error");
+
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "connected") show(`Connected (${msg.payload.role})`, "ok");
+        else if (msg.type === "attendance_created") {
+          const a = msg.payload.attendance;
+          codeBox.classList.remove("hidden");
+          codeBox.innerHTML =
+            `Attendance <b>${a.id}</b> created.<br/>` +
+            `Tell students this 6-digit code:<br/><span class="code">${msg.payload.code}</span>`;
+          show(`Created ${a.subject} / ${a.sectionType} — code ${msg.payload.code}`, "ok");
+        } else if (msg.type === "student_marked") {
+          show(`Student ${msg.payload.studentId} marked (total ${msg.payload.totalMarked})`, "ok");
+        } else if (msg.type === "error") {
+          const extra = msg.payload.errors ? "\n - " + msg.payload.errors.join("\n - ") : "";
+          show(`Error [${msg.payload.code}]: ${msg.payload.message}${extra}`, "err");
+        }
+      };
+
+      form.onsubmit = (e) => {
+        e.preventDefault();
+        const payload = {
+          subject: fields.subject.value.trim(),
+          day: fields.day.value.trim(),
+          date: fields.date.value.trim(),
+          timeSlot: fields.timeSlot.value.trim(),
+          sectionType: fields.sectionType.value.trim(),
+        };
+        ws.send(JSON.stringify({ type: "create_attendance", payload }));
+      };
+    </script>
+  </body>
+</html>
