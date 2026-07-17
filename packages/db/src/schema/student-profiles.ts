@@ -5,10 +5,13 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
+import { relations } from "drizzle-orm";
 
 import { users } from "./users";
 import { programs } from "./programs";
 import { semesters } from "./semesters";
+import { subjectEnrollments } from "./subject-enrollments";
+import { attendanceRecords } from "./attendance-records";
 
 export const studentProfiles = pgTable(
   "student_profiles",
@@ -68,3 +71,20 @@ export const studentProfiles = pgTable(
       .notNull(),
   }
 );
+
+export const studentProfilesRelations = relations(studentProfiles, ({ one, many }) => ({
+  user: one(users, {
+    fields: [studentProfiles.userId],
+    references: [users.id],
+  }),
+  program: one(programs, {
+    fields: [studentProfiles.programId],
+    references: [programs.id],
+  }),
+  semester: one(semesters, {
+    fields: [studentProfiles.semesterId],
+    references: [semesters.id],
+  }),
+  enrollments: many(subjectEnrollments),
+  attendanceRecords: many(attendanceRecords),
+}));

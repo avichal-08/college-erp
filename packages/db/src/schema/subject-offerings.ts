@@ -5,6 +5,7 @@ import { semesters } from "./semesters";
 import { relations } from "drizzle-orm";
 import { subjectEnrollments } from "./subject-enrollments";
 import { timetableEntries } from "./timetable-entries";
+import { attendanceSessions } from "./attendance-sessions";
 
 export const subjectOfferings = pgTable("subject_offerings", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -30,4 +31,5 @@ export const subjectOfferingsRelations = relations(subjectOfferings, ({ one, man
   }),
   enrollments: many(subjectEnrollments),
   timetableEntries: many(timetableEntries),
+  attendanceSessions: many(attendanceSessions),
 }));

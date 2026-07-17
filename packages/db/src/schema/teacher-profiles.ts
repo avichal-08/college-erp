@@ -5,8 +5,11 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
+import { relations } from "drizzle-orm";
 
 import { users } from "./users";
+import { subjectOfferings } from "./subject-offerings";
+import { attendanceSessions } from "./attendance-sessions";
 
 export const teacherProfiles = pgTable(
   "teacher_profiles",
@@ -53,3 +56,12 @@ export const teacherProfiles = pgTable(
       .notNull(),
   }
 );
+
+export const teacherProfilesRelations = relations(teacherProfiles, ({ one, many }) => ({
+  user: one(users, {
+    fields: [teacherProfiles.userId],
+    references: [users.id],
+  }),
+  subjectOfferings: many(subjectOfferings),
+  createdAttendanceSessions: many(attendanceSessions),
+}));

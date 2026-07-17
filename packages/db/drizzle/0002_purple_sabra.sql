@@ -1,1 +1,1 @@
-ALTER TABLE "users" ADD COLUMN "version" integer DEFAULT 1;
+ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "version" integer DEFAULT 1;

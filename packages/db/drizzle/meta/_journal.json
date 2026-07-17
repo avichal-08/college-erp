@@ -29,6 +29,20 @@
       "when": 1780732355933,
       "tag": "0003_closed_scorpion",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1780744322023,
+      "tag": "0004_whole_skreet",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1784268882327,
+      "tag": "0005_rapid_centennial",
+      "breakpoints": true
     }
   ]
 }

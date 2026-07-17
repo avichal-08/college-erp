@@ -18,3 +18,7 @@ export * from "./subject-enrollments";
 export * from "./subject-offerings";
 export * from "./subjects";
 export * from "./timetable-entries";
+
+
+export * from "./attendance-sessions";
+export * from "./attendance-records";
