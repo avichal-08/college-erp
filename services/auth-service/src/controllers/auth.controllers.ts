@@ -28,3 +28,18 @@ export async function login(
     token
   });
 }
+
+export async function me(req: Request, res: Response) {
+  const user = req.user!;
+
+  return res.status(200).json({
+    success: true,
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      firstName: user.firstName,
+      lastName: user.lastName,
+    },
+  });
+}
