@@ -87,7 +87,7 @@ useEffect(() => {
         const id: string = msg.payload.sessionId;
         const subjectOfferingId: AttendanceView = msg.payload.subjectOfferingId;
         setStates((prev) => new Map(prev).set(id, "accepted"));
-        router.push(`student/get-details?subjectId=${subjectOfferingId}`);
+        router.push(`student/get-attendance?subjectId=${subjectOfferingId}`);
       } else if (msg.type === "attendance_closed") {
         const attendance: AttendanceView = msg.payload.attendance;
         
